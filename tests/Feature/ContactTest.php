@@ -193,3 +193,12 @@ it('no deja ver, editar ni eliminar el contacto de otro usuario', function (stri
 
     $this->assertNotSoftDeleted($ajeno);
 })->with(['GET', 'PUT', 'DELETE']);
+
+it('devuelve los permisos de visibilidad al crear un contacto', function () {
+    Sanctum::actingAs($this->user);
+
+    $this->postJson('/api/v1/contacts', contactData())
+        ->assertCreated()
+        ->assertJsonPath('data.name_visible', true)
+        ->assertJsonPath('data.address_visible', true);
+});

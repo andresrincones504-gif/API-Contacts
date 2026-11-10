@@ -29,6 +29,11 @@ class User extends Authenticatable
         'remember_token',
     ];
 
+    protected $attributes = [
+        'name_visible' => true,
+        'address_visible' => true,
+    ];
+
     protected function casts(): array
     {
         return [

@@ -20,6 +20,11 @@ class Contact extends Model
         'address_visible',
     ];
 
+    protected $attributes = [
+        'name_visible' => true,
+        'address_visible' => true,
+    ];
+
     protected function casts(): array
     {
         return [
