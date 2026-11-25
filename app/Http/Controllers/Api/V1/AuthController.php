@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Http\Requests\Auth\RegisterRequest;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Auth\LoginRequest;
 use App\Http\Resources\UserResource;
@@ -14,6 +15,22 @@ use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
 {
+    /**
+     * Registra un usuario y entrega un token.
+     */
+    public function register(RegisterRequest $request): JsonResponse
+    {
+        $user = User::create($request->safe()->except('device_name'));
+
+        $token = $user->createToken($request->validated('device_name'))->plainTextToken;
+
+        return response()->json([
+            'token' => $token,
+            'token_type' => 'Bearer',
+            'user' => new UserResource($user),
+        ], 201);
+    }
+
     public function login(LoginRequest $request): JsonResponse
     {
         $user = User::where('email', $request->validated('email'))->first();

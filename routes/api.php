@@ -12,6 +12,8 @@ Route::prefix('v1')->group(function () {
     Route::post('/auth/login', [AuthController::class, 'login'])
         ->middleware('throttle:login')
         ->name('auth.login');
+    Route::post('/auth/register', [AuthController::class, 'register'])
+        ->name('auth.register');
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::get('/auth/me', [AuthController::class, 'me'])->name('auth.me');
