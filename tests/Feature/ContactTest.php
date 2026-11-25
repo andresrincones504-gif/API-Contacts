@@ -4,133 +4,243 @@ use App\Models\Contact;
 use App\Models\User;
 use Laravel\Sanctum\Sanctum;
 
-function contactData(array $cambios = []): array
-{
-    return array_merge([
+test('exige sesión en todos los endpoints de contactos', function () {
+    // Preparar
+    $contact = Contact::factory()->create(['name' => 'Nombre original']);
+
+    // Actuar y comprobar: los cinco endpoints rechazan la petición
+    $this->getJson('/api/v1/contacts')->assertUnauthorized();
+    $this->postJson('/api/v1/contacts', [
         'name' => 'Carlos Ruiz',
         'email' => 'carlos@correo.test',
         'phone_number' => '3105551234',
-        'address' => 'Calle 10 # 5-20',
-    ], $cambios);
-}
+    ])->assertUnauthorized();
+    $this->getJson("/api/v1/contacts/{$contact->id}")->assertUnauthorized();
+    $this->putJson("/api/v1/contacts/{$contact->id}", ['name' => 'Nombre nuevo'])->assertUnauthorized();
+    $this->deleteJson("/api/v1/contacts/{$contact->id}")->assertUnauthorized();
 
-beforeEach(function () {
-    $this->user = User::factory()->create();
-});
-
-it('exige sesión en todos los endpoints de contactos', function (string $method, string $uri) {
-    $this->json($method, $uri)->assertUnauthorized();
-})->with([
-    ['GET', '/api/v1/contacts'],
-    ['POST', '/api/v1/contacts'],
-    ['GET', '/api/v1/contacts/1'],
-    ['PUT', '/api/v1/contacts/1'],
-    ['DELETE', '/api/v1/contacts/1'],
-]);
-
-it('lista solo los contactos del usuario autenticado', function () {
-    Contact::factory(3)->for($this->user)->create();
-    Contact::factory(2)->create();
-    Sanctum::actingAs($this->user);
-
-    $this->getJson('/api/v1/contacts')
-        ->assertOk()
-        ->assertJsonCount(3, 'data');
-});
-
-it('crea un contacto asignado al usuario autenticado', function () {
-    $otro = User::factory()->create();
-    Sanctum::actingAs($this->user);
-
-    $this->postJson('/api/v1/contacts', contactData(['user_id' => $otro->id]))
-        ->assertCreated()
-        ->assertJsonPath('data.email', 'carlos@correo.test');
-
+    // Nada cambió en la base
+    $this->assertDatabaseCount('contacts', 1);
     $this->assertDatabaseHas('contacts', [
-        'email' => 'carlos@correo.test',
-        'user_id' => $this->user->id,
+        'id' => $contact->id,
+        'name' => 'Nombre original',
+        'deleted_at' => null,
     ]);
 });
 
-it('valida los campos obligatorios al crear', function (string $campo) {
-    Sanctum::actingAs($this->user);
+test('lista solo los contactos propios y no los eliminados', function () {
+    // Preparar
+    $user = User::factory()->create();
+    Contact::factory(3)->for($user)->create();
+    Contact::factory()->for($user)->create()->delete();
+    Contact::factory(2)->create();
+    Sanctum::actingAs($user);
 
-    $this->postJson('/api/v1/contacts', contactData([$campo => '']))
-        ->assertUnprocessable()
-        ->assertJsonValidationErrors([$campo]);
-})->with(['name', 'email', 'phone_number']);
+    // Actuar
+    $response = $this->getJson('/api/v1/contacts');
 
-it('rechaza un teléfono con formato inválido', function () {
-    Sanctum::actingAs($this->user);
-
-    $this->postJson('/api/v1/contacts', contactData(['phone_number' => 'abc123']))
-        ->assertUnprocessable()
-        ->assertJsonValidationErrors(['phone_number']);
+    // Comprobar
+    $response->assertOk()->assertJsonCount(3, 'data');
 });
 
-it('rechaza un correo o teléfono que ya usa otro usuario o contacto', function (string $campo, string $valor, string $origen) {
-    if ($origen === 'usuario') {
-        User::factory()->create([$campo => $valor]);
-    } else {
-        Contact::factory()->create([$campo => $valor]);
-    }
-    Sanctum::actingAs($this->user);
+test('crea un contacto válido para el usuario autenticado', function () {
+    // Preparar
+    $user = User::factory()->create();
+    $otroUsuario = User::factory()->create();
+    Sanctum::actingAs($user);
 
-    $this->postJson('/api/v1/contacts', contactData([$campo => $valor]))
-        ->assertUnprocessable()
-        ->assertJsonValidationErrors([$campo]);
-})->with([
-    ['email', 'repetido@correo.test', 'usuario'],
-    ['email', 'repetido@correo.test', 'contacto'],
-    ['phone_number', '3001112222', 'usuario'],
-    ['phone_number', '3001112222', 'contacto'],
-]);
+    // Actuar: el cliente intenta asignar el contacto a otro usuario
+    $response = $this->postJson('/api/v1/contacts', [
+        'user_id' => $otroUsuario->id,
+        'name' => 'Carlos Ruiz',
+        'email' => 'carlos@correo.test',
+        'phone_number' => '3105551234',
+    ]);
 
-it('permite reutilizar el correo y teléfono de un contacto eliminado', function () {
+    // Comprobar
+    $response->assertCreated()
+        ->assertJsonPath('data.name', 'Carlos Ruiz')
+        ->assertJsonPath('data.phone_number', '3105551234')
+        ->assertJsonPath('data.name_visible', true)
+        ->assertJsonPath('data.address_visible', true);
+
+    $this->assertDatabaseHas('contacts', [
+        'user_id' => $user->id,
+        'name' => 'Carlos Ruiz',
+        'phone_number' => '3105551234',
+    ]);
+});
+
+test('rechaza un contacto sin datos obligatorios o con teléfono inválido', function () {
+    // Preparar
+    Sanctum::actingAs(User::factory()->create());
+
+    // Actuar
+    $sinDatos = $this->postJson('/api/v1/contacts', []);
+    $telefonoInvalido = $this->postJson('/api/v1/contacts', [
+        'name' => 'Carlos Ruiz',
+        'email' => 'carlos@correo.test',
+        'phone_number' => 'abc123',
+    ]);
+
+    // Comprobar
+    $sinDatos->assertUnprocessable()->assertInvalid(['name', 'email', 'phone_number']);
+    $telefonoInvalido->assertUnprocessable()->assertInvalid(['phone_number']);
+    $this->assertDatabaseCount('contacts', 0);
+});
+
+test('rechaza un correo o teléfono que ya usa otro usuario o contacto', function () {
+    // Preparar
+    User::factory()->create([
+        'email' => 'usuario@correo.test',
+        'phone_number' => '3001110000',
+    ]);
+    Contact::factory()->create([
+        'email' => 'contacto@correo.test',
+        'phone_number' => '3002220000',
+    ]);
+    Sanctum::actingAs(User::factory()->create());
+
+    $datos = fn (array $cambios) => array_merge([
+        'name' => 'Carlos Ruiz',
+        'email' => 'nuevo@correo.test',
+        'phone_number' => '3105551234',
+    ], $cambios);
+
+    // Actuar
+    $correoDeUsuario = $this->postJson('/api/v1/contacts', $datos(['email' => 'usuario@correo.test']));
+    $correoDeContacto = $this->postJson('/api/v1/contacts', $datos(['email' => 'contacto@correo.test']));
+    $telefonoDeUsuario = $this->postJson('/api/v1/contacts', $datos(['phone_number' => '3001110000']));
+    $telefonoDeContacto = $this->postJson('/api/v1/contacts', $datos(['phone_number' => '3002220000']));
+
+    // Comprobar: ninguno se creó, solo existe el contacto original
+    $correoDeUsuario->assertUnprocessable()->assertInvalid(['email']);
+    $correoDeContacto->assertUnprocessable()->assertInvalid(['email']);
+    $telefonoDeUsuario->assertUnprocessable()->assertInvalid(['phone_number']);
+    $telefonoDeContacto->assertUnprocessable()->assertInvalid(['phone_number']);
+    $this->assertDatabaseCount('contacts', 1);
+});
+
+test('permite reutilizar el correo y el teléfono de un contacto eliminado', function () {
+    // Preparar
     Contact::factory()->create([
         'email' => 'carlos@correo.test',
         'phone_number' => '3105551234',
     ])->delete();
-    Sanctum::actingAs($this->user);
+    $user = User::factory()->create();
+    Sanctum::actingAs($user);
 
-    $this->postJson('/api/v1/contacts', contactData())->assertCreated();
+    // Actuar
+    $response = $this->postJson('/api/v1/contacts', [
+        'name' => 'Carlos Ruiz',
+        'email' => 'carlos@correo.test',
+        'phone_number' => '3105551234',
+    ]);
+
+    // Comprobar
+    $response->assertCreated();
+    $this->assertDatabaseHas('contacts', [
+        'user_id' => $user->id,
+        'email' => 'carlos@correo.test',
+        'deleted_at' => null,
+    ]);
 });
 
-it('muestra el perfil de un contacto propio', function () {
-    $contact = Contact::factory()->for($this->user)->create();
-    Sanctum::actingAs($this->user);
+test('muestra el perfil de un contacto propio', function () {
+    // Preparar
+    $user = User::factory()->create();
+    $contact = Contact::factory()->for($user)->create();
+    Sanctum::actingAs($user);
 
-    $this->getJson("/api/v1/contacts/{$contact->id}")
-        ->assertOk()
+    // Actuar
+    $response = $this->getJson("/api/v1/contacts/{$contact->id}");
+
+    // Comprobar
+    $response->assertOk()
         ->assertJsonPath('data.id', $contact->id)
         ->assertJsonPath('data.name', $contact->name)
         ->assertJsonPath('data.address', $contact->address);
 });
 
-it('oculta el nombre y la dirección en el perfil si están marcados como ocultos', function () {
-    $contact = Contact::factory()->for($this->user)->create([
+test('oculta el nombre y la dirección en el perfil si están marcados como ocultos', function () {
+    // Preparar
+    $user = User::factory()->create();
+    $contact = Contact::factory()->for($user)->create([
         'name_visible' => false,
         'address_visible' => false,
     ]);
-    Sanctum::actingAs($this->user);
+    Sanctum::actingAs($user);
 
-    $this->getJson("/api/v1/contacts/{$contact->id}")
-        ->assertOk()
+    // Actuar
+    $response = $this->getJson("/api/v1/contacts/{$contact->id}");
+
+    // Comprobar: nombre y dirección ocultos, el resto sigue visible
+    $response->assertOk()
         ->assertJsonPath('data.name', null)
         ->assertJsonPath('data.address', null)
         ->assertJsonPath('data.email', $contact->email);
 });
 
-it('actualiza un contacto propio', function () {
-    $contact = Contact::factory()->for($this->user)->create();
-    Sanctum::actingAs($this->user);
+test('responde 404 en JSON si el contacto no existe o fue eliminado', function () {
+    // Preparar
+    $user = User::factory()->create();
+    $eliminado = Contact::factory()->for($user)->create();
+    $eliminado->delete();
+    Sanctum::actingAs($user);
 
-    $this->putJson("/api/v1/contacts/{$contact->id}", [
+    // Actuar
+    $inexistente = $this->getJson('/api/v1/contacts/99999');
+    $borrado = $this->getJson("/api/v1/contacts/{$eliminado->id}");
+
+    // Comprobar
+    $inexistente->assertNotFound()->assertJsonPath('message', 'Recurso no encontrado.');
+    $borrado->assertNotFound();
+});
+
+test('no deja ver, editar ni eliminar el contacto de otro usuario', function () {
+    // Preparar
+    $owner = User::factory()->create();
+    $visitor = User::factory()->create();
+    $contact = Contact::factory()->for($owner)->create(['name' => 'Contacto privado']);
+    Sanctum::actingAs($visitor);
+
+    // Actuar
+    $ver = $this->getJson("/api/v1/contacts/{$contact->id}");
+    $editar = $this->putJson("/api/v1/contacts/{$contact->id}", ['name' => 'Nombre cambiado por otro']);
+    $eliminar = $this->deleteJson("/api/v1/contacts/{$contact->id}");
+
+    // Comprobar
+    $ver->assertForbidden()->assertJsonMissing(['name' => 'Contacto privado']);
+    $editar->assertForbidden();
+    $eliminar->assertForbidden();
+
+    $this->assertDatabaseHas('contacts', [
+        'id' => $contact->id,
+        'user_id' => $owner->id,
+        'name' => 'Contacto privado',
+        'deleted_at' => null,
+    ]);
+});
+
+test('actualiza un contacto propio', function () {
+    // Preparar
+    $user = User::factory()->create();
+    $contact = Contact::factory()->for($user)->create();
+    Sanctum::actingAs($user);
+
+    // Actuar: cambia el nombre y oculta la dirección; luego guarda con sus propios correo y teléfono
+    $cambio = $this->putJson("/api/v1/contacts/{$contact->id}", [
         'name' => 'Nombre Nuevo',
         'address_visible' => false,
-    ])
-        ->assertOk()
-        ->assertJsonPath('data.name', 'Nombre Nuevo');
+    ]);
+    $mismosDatos = $this->putJson("/api/v1/contacts/{$contact->id}", [
+        'email' => $contact->email,
+        'phone_number' => $contact->phone_number,
+    ]);
+
+    // Comprobar
+    $cambio->assertOk()->assertJsonPath('data.name', 'Nombre Nuevo');
+    $mismosDatos->assertOk();
 
     $this->assertDatabaseHas('contacts', [
         'id' => $contact->id,
@@ -139,66 +249,37 @@ it('actualiza un contacto propio', function () {
     ]);
 });
 
-it('permite guardar un contacto con su propio correo y teléfono', function () {
-    $contact = Contact::factory()->for($this->user)->create();
-    Sanctum::actingAs($this->user);
+test('rechaza actualizar con el correo o el teléfono de otro contacto', function () {
+    // Preparar
+    $user = User::factory()->create();
+    $contact = Contact::factory()->for($user)->create();
+    $otro = Contact::factory()->create();
+    Sanctum::actingAs($user);
 
-    $this->putJson("/api/v1/contacts/{$contact->id}", contactData([
+    // Actuar
+    $correoAjeno = $this->putJson("/api/v1/contacts/{$contact->id}", ['email' => $otro->email]);
+    $telefonoAjeno = $this->putJson("/api/v1/contacts/{$contact->id}", ['phone_number' => $otro->phone_number]);
+
+    // Comprobar
+    $correoAjeno->assertUnprocessable()->assertInvalid(['email']);
+    $telefonoAjeno->assertUnprocessable()->assertInvalid(['phone_number']);
+    $this->assertDatabaseHas('contacts', [
+        'id' => $contact->id,
         'email' => $contact->email,
         'phone_number' => $contact->phone_number,
-    ]))->assertOk();
+    ]);
 });
 
-it('rechaza actualizar con un correo o teléfono de otro contacto', function (string $campo) {
-    $contact = Contact::factory()->for($this->user)->create();
-    $otro = Contact::factory()->create();
-    Sanctum::actingAs($this->user);
+test('elimina un contacto propio con borrado lógico', function () {
+    // Preparar
+    $user = User::factory()->create();
+    $contact = Contact::factory()->for($user)->create();
+    Sanctum::actingAs($user);
 
-    $this->putJson("/api/v1/contacts/{$contact->id}", [$campo => $otro->{$campo}])
-        ->assertUnprocessable()
-        ->assertJsonValidationErrors([$campo]);
-})->with(['email', 'phone_number']);
+    // Actuar
+    $response = $this->deleteJson("/api/v1/contacts/{$contact->id}");
 
-it('elimina un contacto con borrado lógico', function () {
-    $contact = Contact::factory()->for($this->user)->create();
-    Sanctum::actingAs($this->user);
-
-    $this->deleteJson("/api/v1/contacts/{$contact->id}")->assertNoContent();
-
-    $this->assertSoftDeleted($contact);
-});
-
-it('responde 404 para un contacto eliminado', function () {
-    $contact = Contact::factory()->for($this->user)->create();
-    $contact->delete();
-    Sanctum::actingAs($this->user);
-
-    $this->getJson("/api/v1/contacts/{$contact->id}")->assertNotFound();
-});
-
-it('responde 404 en JSON si el contacto no existe', function () {
-    Sanctum::actingAs($this->user);
-
-    $this->getJson('/api/v1/contacts/99999')
-        ->assertNotFound()
-        ->assertJsonPath('message', 'Recurso no encontrado.');
-});
-
-it('no deja ver, editar ni eliminar el contacto de otro usuario', function (string $method) {
-    $ajeno = Contact::factory()->create();
-    Sanctum::actingAs($this->user);
-
-    $this->json($method, "/api/v1/contacts/{$ajeno->id}", contactData())
-        ->assertForbidden();
-
-    $this->assertNotSoftDeleted($ajeno);
-})->with(['GET', 'PUT', 'DELETE']);
-
-it('devuelve los permisos de visibilidad al crear un contacto', function () {
-    Sanctum::actingAs($this->user);
-
-    $this->postJson('/api/v1/contacts', contactData())
-        ->assertCreated()
-        ->assertJsonPath('data.name_visible', true)
-        ->assertJsonPath('data.address_visible', true);
+    // Comprobar: la fila sigue en la base, marcada como eliminada
+    $response->assertNoContent();
+    $this->assertSoftDeleted('contacts', ['id' => $contact->id]);
 });

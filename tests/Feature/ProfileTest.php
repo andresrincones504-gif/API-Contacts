@@ -4,66 +4,83 @@ use App\Models\Contact;
 use App\Models\User;
 use Laravel\Sanctum\Sanctum;
 
-beforeEach(function () {
-    $this->user = User::factory()->create();
+test('exige sesión para ver y editar el perfil', function () {
+    $this->getJson('/api/v1/profile')->assertUnauthorized();
+    $this->putJson('/api/v1/profile', ['name' => 'Nombre Nuevo'])->assertUnauthorized();
 });
 
-it('exige sesión para ver y editar el perfil', function (string $method) {
-    $this->json($method, '/api/v1/profile')->assertUnauthorized();
-})->with(['GET', 'PUT']);
+test('muestra el perfil del usuario autenticado', function () {
+    // Preparar
+    $user = User::factory()->create();
+    Sanctum::actingAs($user);
 
-it('muestra el perfil del usuario autenticado', function () {
-    Sanctum::actingAs($this->user);
+    // Actuar
+    $response = $this->getJson('/api/v1/profile');
 
-    $this->getJson('/api/v1/profile')
-        ->assertOk()
-        ->assertJsonPath('data.email', $this->user->email)
-        ->assertJsonPath('data.phone_number', $this->user->phone_number)
+    // Comprobar
+    $response->assertOk()
+        ->assertJsonPath('data.email', $user->email)
+        ->assertJsonPath('data.phone_number', $user->phone_number)
         ->assertJsonMissingPath('data.password');
 });
 
-it('actualiza el perfil del usuario', function () {
-    Sanctum::actingAs($this->user);
+test('actualiza el perfil del usuario', function () {
+    // Preparar
+    $user = User::factory()->create();
+    Sanctum::actingAs($user);
 
-    $this->putJson('/api/v1/profile', [
+    // Actuar: cambia datos y oculta la dirección; luego guarda con su propio correo y teléfono
+    $cambio = $this->putJson('/api/v1/profile', [
         'name' => 'Nombre Nuevo',
         'address' => 'Carrera 1 # 2-3',
         'address_visible' => false,
-    ])
-        ->assertOk()
-        ->assertJsonPath('data.name', 'Nombre Nuevo');
+    ]);
+    $mismosDatos = $this->putJson('/api/v1/profile', [
+        'email' => $user->email,
+        'phone_number' => $user->phone_number,
+    ]);
 
-    expect($this->user->fresh()->address)->toBe('Carrera 1 # 2-3')
-        ->and($this->user->fresh()->address_visible)->toBeFalse();
+    // Comprobar
+    $cambio->assertOk()->assertJsonPath('data.name', 'Nombre Nuevo');
+    $mismosDatos->assertOk();
+
+    $this->assertDatabaseHas('users', [
+        'id' => $user->id,
+        'name' => 'Nombre Nuevo',
+        'address' => 'Carrera 1 # 2-3',
+        'address_visible' => false,
+    ]);
 });
 
-it('permite guardar su propio correo y teléfono', function () {
-    Sanctum::actingAs($this->user);
+test('rechaza un correo o teléfono que ya usa otro usuario o contacto', function () {
+    // Preparar
+    $user = User::factory()->create();
+    $otroUsuario = User::factory()->create();
+    $contacto = Contact::factory()->create();
+    Sanctum::actingAs($user);
 
-    $this->putJson('/api/v1/profile', [
-        'email' => $this->user->email,
-        'phone_number' => $this->user->phone_number,
-    ])->assertOk();
+    // Actuar
+    $correoDeUsuario = $this->putJson('/api/v1/profile', ['email' => $otroUsuario->email]);
+    $correoDeContacto = $this->putJson('/api/v1/profile', ['email' => $contacto->email]);
+    $telefonoDeUsuario = $this->putJson('/api/v1/profile', ['phone_number' => $otroUsuario->phone_number]);
+    $telefonoDeContacto = $this->putJson('/api/v1/profile', ['phone_number' => $contacto->phone_number]);
+
+    // Comprobar: el perfil no cambió
+    $correoDeUsuario->assertUnprocessable()->assertInvalid(['email']);
+    $correoDeContacto->assertUnprocessable()->assertInvalid(['email']);
+    $telefonoDeUsuario->assertUnprocessable()->assertInvalid(['phone_number']);
+    $telefonoDeContacto->assertUnprocessable()->assertInvalid(['phone_number']);
+    $this->assertDatabaseHas('users', [
+        'id' => $user->id,
+        'email' => $user->email,
+        'phone_number' => $user->phone_number,
+    ]);
 });
 
-it('rechaza un correo o teléfono que ya usa otro usuario o contacto', function (string $campo, string $origen) {
-    $otro = $origen === 'usuario' ? User::factory()->create() : Contact::factory()->create();
-    Sanctum::actingAs($this->user);
+test('rechaza un correo con formato inválido', function () {
+    Sanctum::actingAs(User::factory()->create());
 
-    $this->putJson('/api/v1/profile', [$campo => $otro->{$campo}])
-        ->assertUnprocessable()
-        ->assertJsonValidationErrors([$campo]);
-})->with([
-    ['email', 'usuario'],
-    ['email', 'contacto'],
-    ['phone_number', 'usuario'],
-    ['phone_number', 'contacto'],
-]);
+    $response = $this->putJson('/api/v1/profile', ['email' => 'no-es-un-correo']);
 
-it('valida el formato del correo', function () {
-    Sanctum::actingAs($this->user);
-
-    $this->putJson('/api/v1/profile', ['email' => 'no-es-un-correo'])
-        ->assertUnprocessable()
-        ->assertJsonValidationErrors(['email']);
+    $response->assertUnprocessable()->assertInvalid(['email']);
 });

@@ -3,89 +3,121 @@
 use App\Models\User;
 use Laravel\Sanctum\Sanctum;
 
-function loginData(array $cambios = []): array
-{
-    return array_merge([
-        'email' => 'ana@contacts.test',
-        'password' => 'secreta123',
-        'device_name' => 'pruebas',
-    ], $cambios);
-}
-
-beforeEach(function () {
-    $this->user = User::factory()->create([
+test('inicia sesión y entrega un token con credenciales correctas', function () {
+    // Preparar
+    $user = User::factory()->create([
         'email' => 'ana@contacts.test',
         'password' => 'secreta123',
     ]);
-});
 
-it('entrega un token con credenciales correctas', function () {
-    $this->postJson('/api/v1/auth/login', loginData())
-        ->assertOk()
+    // Actuar
+    $response = $this->postJson('/api/v1/auth/login', [
+        'email' => 'ana@contacts.test',
+        'password' => 'secreta123',
+        'device_name' => 'pruebas',
+    ]);
+
+    // Comprobar
+    $response->assertOk()
         ->assertJsonStructure(['token', 'token_type', 'user' => ['id', 'name', 'email']])
         ->assertJsonPath('user.email', 'ana@contacts.test')
         ->assertJsonMissingPath('user.password');
 
-    expect($this->user->tokens()->count())->toBe(1);
+    $this->assertDatabaseHas('personal_access_tokens', [
+        'tokenable_id' => $user->id,
+        'name' => 'pruebas',
+    ]);
 });
 
-it('rechaza una contraseña incorrecta con 422', function () {
-    $this->postJson('/api/v1/auth/login', loginData(['password' => 'otra']))
-        ->assertUnprocessable()
-        ->assertJsonValidationErrors(['email']);
-});
+test('rechaza el login con credenciales incorrectas', function () {
+    // Preparar
+    User::factory()->create([
+        'email' => 'ana@contacts.test',
+        'password' => 'secreta123',
+    ]);
 
-it('usa el mismo mensaje si el correo no existe', function () {
-    $this->postJson('/api/v1/auth/login', loginData(['email' => 'nadie@contacts.test']))
-        ->assertUnprocessable()
+    // Actuar: contraseña incorrecta y correo inexistente
+    $contrasenaIncorrecta = $this->postJson('/api/v1/auth/login', [
+        'email' => 'ana@contacts.test',
+        'password' => 'otra-contraseña',
+        'device_name' => 'pruebas',
+    ]);
+    $correoInexistente = $this->postJson('/api/v1/auth/login', [
+        'email' => 'nadie@contacts.test',
+        'password' => 'secreta123',
+        'device_name' => 'pruebas',
+    ]);
+
+    // Comprobar: el mismo mensaje en ambos casos y ningún token creado
+    $contrasenaIncorrecta->assertUnprocessable()
         ->assertJsonPath('errors.email.0', 'Las credenciales no son correctas.');
+    $correoInexistente->assertUnprocessable()
+        ->assertJsonPath('errors.email.0', 'Las credenciales no son correctas.');
+    $this->assertDatabaseCount('personal_access_tokens', 0);
 });
 
-it('valida los campos obligatorios', function (string $campo) {
-    $this->postJson('/api/v1/auth/login', loginData([$campo => '']))
-        ->assertUnprocessable()
-        ->assertJsonValidationErrors([$campo]);
-})->with(['email', 'password', 'device_name']);
+test('exige correo, contraseña y nombre de dispositivo para iniciar sesión', function () {
+    $response = $this->postJson('/api/v1/auth/login', []);
 
-it('pide token para ver el perfil', function () {
+    $response->assertUnprocessable()
+        ->assertInvalid(['email', 'password', 'device_name']);
+});
+
+test('bloquea el login al sexto intento fallido en un minuto', function () {
+    // Preparar
+    User::factory()->create(['email' => 'ana@contacts.test']);
+    $intentoFallido = [
+        'email' => 'ana@contacts.test',
+        'password' => 'incorrecta',
+        'device_name' => 'pruebas',
+    ];
+
+    // Actuar: cinco intentos permitidos
+    foreach (range(1, 5) as $intento) {
+        $this->postJson('/api/v1/auth/login', $intentoFallido)->assertUnprocessable();
+    }
+
+    // Comprobar: el sexto se bloquea
+    $this->postJson('/api/v1/auth/login', $intentoFallido)->assertTooManyRequests();
+});
+
+test('exige token para ver el usuario autenticado', function () {
+    // Con y sin la cabecera Accept
     $this->getJson('/api/v1/auth/me')->assertUnauthorized();
-});
 
-it('responde 401 en JSON aunque falte la cabecera Accept', function () {
     $this->get('/api/v1/auth/me')
         ->assertUnauthorized()
         ->assertHeader('Content-Type', 'application/json');
 });
 
-it('devuelve el perfil del usuario autenticado', function () {
-    Sanctum::actingAs($this->user);
+test('muestra el usuario autenticado', function () {
+    // Preparar
+    $user = User::factory()->create(['email' => 'ana@contacts.test']);
+    Sanctum::actingAs($user);
 
-    $this->getJson('/api/v1/auth/me')
-        ->assertOk()
+    // Actuar
+    $response = $this->getJson('/api/v1/auth/me');
+
+    // Comprobar
+    $response->assertOk()
+        ->assertJsonPath('data.id', $user->id)
         ->assertJsonPath('data.email', 'ana@contacts.test')
         ->assertJsonMissingPath('data.password');
 });
 
-it('cierra sesión y revoca el token', function () {
-    $token = $this->user->createToken('pruebas')->plainTextToken;
+test('cierra sesión y revoca el token', function () {
+    // Preparar
+    $user = User::factory()->create();
+    $token = $user->createToken('pruebas')->plainTextToken;
 
-    $this->withToken($token)
-        ->postJson('/api/v1/auth/logout')
-        ->assertNoContent();
-
-    expect($this->user->tokens()->count())->toBe(0);
-});
-
-it('pide token para cerrar sesión', function () {
+    // Sin token no se puede cerrar sesión, y el token existente no se toca
     $this->postJson('/api/v1/auth/logout')->assertUnauthorized();
-});
+    $this->assertDatabaseCount('personal_access_tokens', 1);
 
-it('limita los intentos de login a 5 por minuto', function () {
-    foreach (range(1, 5) as $intento) {
-        $this->postJson('/api/v1/auth/login', loginData(['password' => 'otra']))
-            ->assertUnprocessable();
-    }
+    // Actuar
+    $response = $this->withToken($token)->postJson('/api/v1/auth/logout');
 
-    $this->postJson('/api/v1/auth/login', loginData(['password' => 'otra']))
-        ->assertTooManyRequests();
+    // Comprobar
+    $response->assertNoContent();
+    $this->assertDatabaseCount('personal_access_tokens', 0);
 });
